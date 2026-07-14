@@ -1,0 +1,142 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+  checks: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: ermakov880/devops-project
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    name: Lint Code Base
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Super-Linter
+        uses: super-linter/super-linter@v6
+        env:
+          DEFAULT_BRANCH: master
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VALIDATE_ALL_CODEBASE: true
+          FAIL_IF_FOUND_ERRORS: true
+          FILTER_REGEX_EXCLUDE: '.*README\.md$'
+
+  secrets:
+    runs-on: ubuntu-latest
+    name: Scan for Secrets
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FAIL_ON_FOUND: true
+
+  build-and-scan:
+    runs-on: ubuntu-latest
+    needs: [lint, secrets]
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.fork == false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Build Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:test
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:test
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          exit-code: '0'               
+          severity: 'CRITICAL'
+
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Push Docker image
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-scan
+    if: github.event_name == 'push'
+    name: Deploy to Server
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            if ! command -v git &> /dev/null; then
+              sudo apt update && sudo apt install -y git
+            fi
+
+            if [ ! -d "DevopsProject" ]; then
+              git clone https://github.com/Egorict/DevopsProject.git DevopsProject
+            fi
+            cd DevopsProject
+            git pull origin master
+
+            if ! command -v ansible-playbook &> /dev/null; then
+              sudo apt update && sudo apt install -y ansible
+            fi
+
+            ansible-playbook ansible/playbook.yml -i localhost, -c local
+
+            sleep 6
+            if curl -f -s -o /dev/null "https://www.apollonovaalisaviachislavovna.ru"; then
+              echo "Site is up"
+            else
+              echo "Site is not responding"
+              exit 1
+            fi

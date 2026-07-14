@@ -1,0 +1,4 @@
+---
+domain_name: "www.apollonovaalisaviachislavovna.ru"   
+letsencrypt_email: "egoregor2008@gmail.com"          
+app_port: 8080                                  
